@@ -2,11 +2,14 @@ MIT License
 
 Copyright (c) 2026 Na Jung
 
-This project implements the Recursive Language Model (RLM) paradigm for
-Claude Code, adapted from the concepts in:
-  "Recursive Language Models" by Alex L. Zhang, Tim Kraska, Omar Khattab
-  MIT CSAIL, arXiv:2512.24601v2
-  https://github.com/alexzhang13/rlm
+This project is adapted from the Recursive Language Model (RLM) paradigm
+originally developed by Alex L. Zhang, Tim Kraska, and Omar Khattab at
+MIT CSAIL, as described in their paper (arXiv:2512.24601v2) and reference
+implementation at https://github.com/alexzhang13/rlm.
+
+This is an independent reimplementation for Claude — no code was copied
+from the original repository, but the core algorithmic ideas originate
+from their work.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
