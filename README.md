@@ -12,14 +12,14 @@ Claude RLM ships with **7 professional domains**, each with deep sub-sector cove
 
 | Domain | Synonym Groups | Terms | Sub-sectors |
 |--------|:-:|:-:|---|
-| **Finance** | 18 | 304 | SEC/10-K, M&A/IB, PE/VC, banking/credit, asset management |
+| **Finance** | 10 | 83 | SEC/10-K, annual reports, financial statements |
 | **Legal** | 14 | 258 | Contracts, litigation, IP, corporate governance, employment, regulatory |
 | **Medical** | 13 | 295 | Clinical, pharma, clinical trials, devices, billing, public health |
 | **Academic** | 11 | 223 | STEM, social sciences, grants, systematic reviews, theses |
 | **Insurance** | 15 | 306 | P&C, auto, workers comp, professional, health, life, reinsurance |
 | **Real Estate** | 18 | 328 | Leasing, purchase/sale, construction, REIT, appraisal, title, environmental |
 | **Compliance** | 17 | 366 | SOX, GDPR, HIPAA, PCI DSS, AML/KYC, ESG, third-party risk |
-| **Total** | **106** | **2,080** | |
+| **Total** | **98** | **1,859** | |
 
 Domains are auto-detected from document content and filename. Each domain includes synonym groups (so "revenue" also finds "net sales", "total net revenue", etc.), detection patterns, and pre-built query templates.
 
@@ -137,7 +137,7 @@ Verify findings → Buffer aggregation → Verified answer
 ### Key Techniques
 
 1. **Targeted reading**: Only examine sections relevant to the query
-2. **Synonym expansion**: Domain-specific vocabulary resolution (2,080 terms across 7 domains)
+2. **Synonym expansion**: Domain-specific vocabulary resolution (1,859 terms across 7 domains)
 3. **Sub-queries**: Smaller model handles focused verification tasks
 4. **Buffer aggregation**: Findings accumulate incrementally
 5. **Verification loops**: Always cross-check against source text
@@ -204,7 +204,7 @@ agent_sdk_bridge.py        # Platform deployment adapter
 domains/                   # Domain plugin package
   __init__.py              # Registry and auto-detection
   base.py                  # Abstract base domain class
-  finance.py               # 18 synonym groups, 304 terms
+  finance.py               # 10 synonym groups, 83 terms
   legal.py                 # 14 synonym groups, 258 terms
   medical.py               # 13 synonym groups, 295 terms
   academic.py              # 11 synonym groups, 223 terms
