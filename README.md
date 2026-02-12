@@ -1,6 +1,6 @@
 # Claude RLM — Recursive Language Model for Document Analysis
 
-Adapted from the research paper ["Recursive Language Models" (arXiv:2512.24601v2)](https://arxiv.org/abs/2512.24601v2) and the [reference implementation](https://github.com/alexzhang13/rlm). This is a **100% original implementation** for Claude — zero code was reused from the original repo.
+Adapted from the original RLM repository ([github.com/alexzhang13/rlm](https://github.com/alexzhang13/rlm)) and research paper ["Recursive Language Models" (arXiv:2512.24601v2)](https://arxiv.org/abs/2512.24601v2). The original repository was used as a reference when adapting and transforming the RLM paradigm specifically for Claude.
 
 ## The Problem
 
