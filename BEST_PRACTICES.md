@@ -272,6 +272,6 @@ monolith is removed. Until then, don't add new tests to it.
 5. [x] Add `test_sandbox_timeout` test
 6. [x] Add `test_middleware_exception_propagates` test
 7. [x] Add `test_ipc_malformed_json` test
-8. [ ] Add `test_client_retries_on_rate_limit` test (requires mocking anthropic SDK)
+8. [x] Add `test_client_retries_on_rate_limit` test (requires mocking anthropic SDK)
 9. [x] Extract shared loop logic from run()/arun()
 10. [x] Validate IPC JSON has required `prompt` field
