@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "claude-rlm"
-version = "0.1.0"
+version = "0.2.0"
 description = "Recursive Language Model for document analysis — treats documents as environments, not context"
 readme = "README.md"
 license = "MIT"
@@ -32,6 +32,7 @@ classifiers = [
 ]
 dependencies = [
     "anthropic>=0.40.0",
+    "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -47,9 +48,10 @@ Repository = "https://github.com/njlee1/claude-rlm"
 Issues = "https://github.com/njlee1/claude-rlm/issues"
 
 [project.scripts]
-claude-rlm = "agent_sdk_bridge:main"
+claude-rlm = "claude_rlm.interfaces.cli:main"
 
 [tool.setuptools.packages.find]
+where = ["src", "."]
 include = ["claude_rlm*", "domains*"]
 
 [tool.ruff]
@@ -60,5 +62,5 @@ target-version = "py39"
 select = ["E", "F", "W", "I"]
 
 [tool.pytest.ini_options]
-testpaths = ["."]
+testpaths = ["tests"]
 python_files = ["test_*.py"]

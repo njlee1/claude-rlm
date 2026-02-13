@@ -3,6 +3,14 @@
 Claude RLM (Recursive Language Model) - Advanced Document Processing System
 ============================================================================
 
+NOTE: This root-level module is maintained for backward compatibility.
+New code should import from the src/claude_rlm/ package instead:
+
+    from claude_rlm.engine import Sandbox, IPCServer
+    from claude_rlm.orchestrator import QueryOrchestrator
+    from claude_rlm.document import DocumentRegistry
+    from claude_rlm.interfaces import RLMPatterns
+
 Adapted from the RLM paradigm described in:
 "Recursive Language Models" by Alex L. Zhang, Tim Kraska, Omar Khattab
 MIT CSAIL, arXiv:2512.24601v2, January 2026
@@ -26,6 +34,7 @@ import re
 import socket
 import socketserver
 import struct
+import sys
 import tempfile
 import threading
 import time
@@ -34,6 +43,36 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
 import subprocess
+
+# v2 engine imports (Phase 2)
+# We can't use `from claude_rlm.engine import ...` here because this file
+# IS `claude_rlm` (a module), not a package. So we import directly from src/.
+import importlib.util as _ilu
+
+def _import_from_src(module_path: str, module_name: str):
+    """Import a module from src/ by absolute path."""
+    _spec = _ilu.spec_from_file_location(module_name, module_path)
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    return _mod
+
+_engine_sandbox = _import_from_src(
+    str(Path(__file__).parent / "src" / "claude_rlm" / "engine" / "sandbox.py"),
+    "_claude_rlm_engine_sandbox",
+)
+_engine_ipc = _import_from_src(
+    str(Path(__file__).parent / "src" / "claude_rlm" / "engine" / "ipc.py"),
+    "_claude_rlm_engine_ipc",
+)
+_engine_code = _import_from_src(
+    str(Path(__file__).parent / "src" / "claude_rlm" / "engine" / "code_extractor.py"),
+    "_claude_rlm_engine_code",
+)
+
+Sandbox = _engine_sandbox.Sandbox
+SandboxResult = _engine_sandbox.SandboxResult
+IPCServer = _engine_ipc.IPCServer
+extract_repl_blocks = _engine_code.extract_repl_blocks
 
 
 # =============================================================================
@@ -697,13 +736,15 @@ Text to analyze:
     def _execute_code_blocks(self, response: str) -> Optional[Dict[str, Any]]:
         """Extract and run ```repl code blocks from response.
 
+        Delegates to engine.extract_repl_blocks() for parsing and
+        self._safe_run() for execution.
+
         Returns None if no code blocks found, or a dict with:
             - "output": str — combined stdout/stderr from all blocks
             - "terminated": bool — True if FINAL()/FINAL_VAR() was called
             - "final_answer": str|None — the answer if terminated
         """
-        code_pattern = r"```repl\s*\n(.*?)\n```"
-        matches = re.findall(code_pattern, response, re.DOTALL)
+        matches = extract_repl_blocks(response)
 
         if not matches:
             return None
@@ -736,225 +777,33 @@ Text to analyze:
     def _start_ipc_server(self) -> tuple:
         """Start a threading TCP server for sub_query IPC.
 
-        Returns (server, port) — caller must call server.shutdown() when done.
+        Delegates to engine.IPCServer. Returns (ipc_server, port) for
+        backward compatibility — caller must call ipc_server.stop() when done.
         """
-        rlm_ref = self  # Capture reference for handler closure
-
-        class SubQueryHandler(socketserver.StreamRequestHandler):
-            def handle(self):
-                try:
-                    # Read 4-byte length prefix
-                    length_bytes = self.rfile.read(4)
-                    if len(length_bytes) < 4:
-                        return
-                    msg_len = struct.unpack("!I", length_bytes)[0]
-
-                    # Read the JSON request
-                    data = self.rfile.read(msg_len)
-                    request = json.loads(data.decode("utf-8"))
-
-                    prompt = request.get("prompt", "")
-                    context_slice = request.get("context_slice")
-
-                    # Make the actual API call via the parent's sub_query
-                    response_text = rlm_ref.sub_query(prompt, context_slice)
-
-                    # Send response back with 4-byte length prefix
-                    resp_bytes = json.dumps({"result": response_text}).encode("utf-8")
-                    self.wfile.write(struct.pack("!I", len(resp_bytes)))
-                    self.wfile.write(resp_bytes)
-                    self.wfile.flush()
-                except Exception as e:
-                    try:
-                        err = json.dumps({"error": str(e)}).encode("utf-8")
-                        self.wfile.write(struct.pack("!I", len(err)))
-                        self.wfile.write(err)
-                        self.wfile.flush()
-                    except Exception:
-                        pass
-
-        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SubQueryHandler)
-        port = server.server_address[1]
-
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-
-        return server, port
+        ipc = IPCServer(self.sub_query)
+        port = ipc.start()
+        return ipc, port
 
     def _safe_run(self, code: str) -> Dict[str, Any]:
         """Run code in a subprocess with socket-based IPC for sub_query().
 
-        The subprocess can call sub_query(), FINAL(), FINAL_VAR(), and
-        SHOW_VARS() — all routed back to the parent process via TCP.
-
-        Returns dict with keys: output, terminated, final_answer.
+        Delegates to engine.Sandbox for execution and engine.IPCServer
+        for sub_query communication. Returns dict with keys:
+        output, terminated, final_answer.
         """
-        # Start IPC server for sub_query calls
-        server, port = self._start_ipc_server()
-
-        # Write context to temp file
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False
-        ) as ctx_file:
-            ctx_file.write(self.context)
-            ctx_path = ctx_file.name
-
-        # Write state to temp file
-        state = {"buffers": self.buffers, "findings": self.findings}
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as state_file:
-            json.dump(state, state_file, default=str)
-            state_path = state_file.name
-
-        # Temp file for termination signal
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as term_file:
-            json.dump({"terminated": False}, term_file)
-            term_path = term_file.name
-
-        # Indent user code for try/except block
-        indented = "\n".join("    " + line for line in code.splitlines())
-
-        # Build wrapper script with real IPC-based sub_query
-        wrapper = (
-            "import json, re, sys, socket, struct\n"
-            "\n"
-            f"with open({ctx_path!r}, 'r') as f:\n"
-            "    context = f.read()\n"
-            "\n"
-            f"with open({state_path!r}, 'r') as f:\n"
-            "    _state = json.load(f)\n"
-            "buffers = _state['buffers']\n"
-            "findings = _state['findings']\n"
-            "\n"
-            "def sub_query(prompt, context_slice=None):\n"
-            '    """Query a sub-LLM for targeted analysis. Makes a real API call."""\n'
-            '    request = {"prompt": str(prompt), "context_slice": context_slice}\n'
-            '    req_bytes = json.dumps(request).encode("utf-8")\n'
-            f'    sock = socket.create_connection(("127.0.0.1", {port}), timeout=120)\n'
-            "    try:\n"
-            '        sock.sendall(struct.pack("!I", len(req_bytes)))\n'
-            "        sock.sendall(req_bytes)\n"
-            '        length_bytes = b""\n'
-            "        while len(length_bytes) < 4:\n"
-            "            chunk = sock.recv(4 - len(length_bytes))\n"
-            "            if not chunk:\n"
-            '                return "ERROR: Connection closed by server"\n'
-            "            length_bytes += chunk\n"
-            '        msg_len = struct.unpack("!I", length_bytes)[0]\n'
-            '        data = b""\n'
-            "        while len(data) < msg_len:\n"
-            "            chunk = sock.recv(min(msg_len - len(data), 65536))\n"
-            "            if not chunk:\n"
-            "                break\n"
-            "            data += chunk\n"
-            '        response = json.loads(data.decode("utf-8"))\n'
-            '        if "error" in response:\n'
-            "            return f\"ERROR: {response['error']}\"\n"
-            '        return response.get("result", "")\n'
-            "    finally:\n"
-            "        sock.close()\n"
-            "\n"
-            "def SHOW_VARS():\n"
-            '    """Print all stored variables."""\n'
-            '    print("=== STORED VARIABLES ===")\n'
-            '    print(f"buffers ({len(buffers)} keys): {list(buffers.keys())}")\n'
-            '    print(f"findings ({len(findings)} items)")\n'
-            "    for k, v in buffers.items():\n"
-            "        preview = str(v)[:200]\n"
-            '        print(f"  buffers[{k!r}] = {preview}")\n'
-            "    for i, f in enumerate(findings[:10]):\n"
-            '        print(f"  findings[{i}] = {str(f)[:200]}")\n'
-            "    if len(findings) > 10:\n"
-            '        print(f"  ... and {len(findings) - 10} more findings")\n'
-            "\n"
-            "class _RLMTermination(Exception):\n"
-            "    def __init__(self, answer):\n"
-            "        self.answer = answer\n"
-            "\n"
-            "def FINAL(answer):\n"
-            '    """Terminate the REPL loop and return this answer."""\n'
-            "    raise _RLMTermination(str(answer))\n"
-            "\n"
-            "def FINAL_VAR(var_name):\n"
-            '    """Terminate and return the value of a named variable."""\n'
-            "    # Look up in local scope (buffers, findings, or user-defined vars)\n"
-            "    import __main__ as _m\n"
-            "    _locals = {k: v for k, v in globals().items() if not k.startswith('_')}\n"
-            "    val = _locals.get(var_name)\n"
-            "    if val is None and var_name in dir(_m):\n"
-            "        val = getattr(_m, var_name)\n"
-            "    if val is None:\n"
-            f'        raise _RLMTermination(f"ERROR: Variable {{var_name!r}} not found")\n'
-            "    raise _RLMTermination(str(val))\n"
-            "\n"
-            "try:\n"
-            f"{indented}\n"
-            "except _RLMTermination as t:\n"
-            f"    with open({term_path!r}, 'w') as f:\n"
-            '        json.dump({"terminated": True, "final_answer": t.answer}, f)\n'
-            "\n"
-            f"with open({state_path!r}, 'w') as f:\n"
-            '    json.dump({"buffers": buffers, "findings": findings}, f, default=str)\n'
-        )
-
+        ipc, port = self._start_ipc_server()
         try:
-            result = subprocess.run(
-                ["python3", "-c", wrapper],
-                capture_output=True,
-                text=True,
-                timeout=self.config.code_timeout,
+            sandbox = Sandbox(timeout=self.config.code_timeout)
+            result = sandbox.execute(
+                code=code,
+                context=self.context,
+                buffers=self.buffers,
+                findings=self.findings,
+                ipc_port=port,
             )
-
-            output_parts = []
-            if result.stdout:
-                output_parts.append(result.stdout)
-            if result.stderr:
-                # Feed errors back to the model (original RLM pattern:
-                # errors don't stop the loop, they become REPL output)
-                output_parts.append(f"STDERR: {result.stderr}")
-
-            # Read back updated state
-            try:
-                with open(state_path, "r") as f:
-                    updated_state = json.load(f)
-                self.buffers = updated_state.get("buffers", self.buffers)
-                self.findings = updated_state.get("findings", self.findings)
-            except Exception:
-                pass
-
-            # Check for FINAL()/FINAL_VAR() termination
-            try:
-                with open(term_path, "r") as f:
-                    term_state = json.load(f)
-                if term_state.get("terminated"):
-                    return {
-                        "output": "\n".join(output_parts),
-                        "terminated": True,
-                        "final_answer": term_state.get("final_answer", ""),
-                    }
-            except Exception:
-                pass
-
-            return {
-                "output": "\n".join(output_parts) if output_parts else "",
-                "terminated": False,
-                "final_answer": None,
-            }
-
-        except subprocess.TimeoutExpired:
-            return {
-                "output": f"Error: Code timed out after {self.config.code_timeout}s",
-                "terminated": False,
-                "final_answer": None,
-            }
+            return result.to_dict()
         finally:
-            server.shutdown()
-            Path(ctx_path).unlink(missing_ok=True)
-            Path(state_path).unlink(missing_ok=True)
-            Path(term_path).unlink(missing_ok=True)
+            ipc.stop()
 
     def _parse_final_answer(self, response: str) -> Dict[str, Any]:
         """Parse the final answer from response."""
