@@ -1,24 +1,25 @@
 """
 Finance domain plugin for RLM document analysis.
 
-Covers SEC filings, annual reports, and financial statements.
-Demonstrates the domain plugin pattern — extend with your own
-sub-sector synonym groups as needed.
+Covers SEC filings, annual reports, financial statements, and common
+corporate finance concepts. Extend with your own sub-sector synonym
+groups (M&A, PE/VC, banking, etc.) for deeper coverage.
 """
 
 from .base import BaseDomain
 
 
 class FinanceDomain(BaseDomain):
-    """Finance domain: SEC filings, financial statements."""
+    """Finance domain: SEC filings, financial statements, corporate finance."""
 
     name = "finance"
     description = (
         "Financial document analysis (SEC filings, annual reports, "
-        "financial statements)"
+        "financial statements, corporate finance)"
     )
 
     synonyms = {
+        # --- Core Financial Statements ---
         "revenue": [
             "revenue", "net revenue", "net sales", "sales revenue",
             "total net revenue", "gross revenue", "operating revenue",
@@ -71,6 +72,36 @@ class FinanceDomain(BaseDomain):
             "operating income", "income from operations",
             "operating profit", "operating loss", "operating income (loss)",
         ],
+        # --- Valuation (general) ---
+        "valuation": [
+            "enterprise value", "EV", "equity value", "market cap",
+            "market capitalization", "EV/EBITDA", "EV/Revenue",
+            "P/E ratio", "price to earnings", "price to book",
+            "DCF", "discounted cash flow", "terminal value",
+        ],
+        # --- Financial Ratios ---
+        "ratios": [
+            "current ratio", "quick ratio", "debt to equity",
+            "return on equity", "ROE", "return on assets", "ROA",
+            "return on invested capital", "ROIC",
+            "profit margin", "operating margin", "net margin",
+            "asset turnover", "inventory turnover",
+        ],
+        # --- Debt & Interest ---
+        "debt": [
+            "total debt", "net debt", "long-term debt",
+            "interest expense", "interest rate", "maturity",
+            "principal", "senior debt", "subordinated debt",
+            "revolving credit", "term loan",
+        ],
+        # --- Shareholder / Equity ---
+        "equity": [
+            "shareholders equity", "stockholders equity", "book value",
+            "retained earnings", "treasury stock",
+            "shares outstanding", "diluted shares",
+            "dividends", "dividend per share", "dividend yield",
+            "stock repurchase", "buyback",
+        ],
     }
 
     document_patterns = [
@@ -82,6 +113,8 @@ class FinanceDomain(BaseDomain):
         r"MANAGEMENT.S\s+DISCUSSION",
         r"EBITDA|earnings\s+per\s+share",
         r"fiscal\s+year|FY\s*\d{4}",
+        r"(?:ENTERPRISE|EQUITY)\s+VALUE",
+        r"(?:LEVERAGE|COVERAGE)\s+RATIO",
     ]
 
     chunking_strategy = "sec_items"
@@ -112,6 +145,15 @@ class FinanceDomain(BaseDomain):
         ),
         "eps": (
             "What are the basic and diluted earnings per share? "
+            "Look for: {synonyms}. Report for each period available."
+        ),
+        "valuation": (
+            "What valuation metrics are discussed? "
+            "Look for: {synonyms}. "
+            "Include any multiples, methodologies, or implied values."
+        ),
+        "ratios": (
+            "What are the key financial ratios? "
             "Look for: {synonyms}. Report for each period available."
         ),
     }
