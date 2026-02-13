@@ -7,7 +7,7 @@ the `LLMClient` protocol.
 """
 
 from datetime import datetime
-from typing import Protocol, Dict, Any, List, Optional, Callable
+from typing import Protocol, Dict, Any, List, Optional, Callable, Tuple
 
 from ..constants import MAX_OUTPUT_CHARS
 from ..engine import Sandbox, IPCServer, extract_repl_blocks
@@ -28,7 +28,7 @@ class LLMClient(Protocol):
         max_tokens: int,
         system: str,
         messages: List[Dict[str, str]],
-    ) -> tuple:
+    ) -> Tuple[str, int, int]:
         """Call the LLM and return (response_text, input_tokens, output_tokens)."""
         ...
 
@@ -42,7 +42,7 @@ class AsyncLLMClient(Protocol):
         max_tokens: int,
         system: str,
         messages: List[Dict[str, str]],
-    ) -> tuple:
+    ) -> Tuple[str, int, int]:
         """Async call returning (response_text, input_tokens, output_tokens)."""
         ...
 
@@ -82,6 +82,121 @@ class QueryOrchestrator:
         self.verbose = config_verbose
         self.middleware = middleware or MiddlewareChain()
 
+    # ── Shared helpers (used by both run() and arun()) ──────────────
+
+    def _init_loop_state(
+        self, question: str, context: str
+    ) -> Dict[str, Any]:
+        """Build the initial loop state dict for a query."""
+        question, context = self.middleware.run_pre(question, context)
+        return {
+            "question": question,
+            "context": context,
+            "buffers": {},
+            "findings": [],
+            "trajectory": [],
+            "root_in": 0,
+            "root_out": 0,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        f"Answer this query: {question}\n\n"
+                        "You have not interacted with the REPL environment yet. "
+                        "Explore the context by writing python code in ```repl "
+                        "blocks first before generating your final answer."
+                    ),
+                }
+            ],
+        }
+
+    def _process_response(
+        self, state: Dict[str, Any], response_text: str, in_tok: int, out_tok: int
+    ) -> Optional[Dict[str, Any]]:
+        """Process an LLM response. Returns a result dict if done, else None."""
+        state["root_in"] += in_tok
+        state["root_out"] += out_tok
+        state["trajectory"].append({
+            "iteration": len(state["trajectory"]) + 1,
+            "response": response_text,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        # Text-based termination
+        if "FINAL_ANSWER:" in response_text:
+            result = parse_final_answer(
+                response_text,
+                root_input_tokens=state["root_in"],
+                root_output_tokens=state["root_out"],
+                trajectory=state["trajectory"] if self.save_trajectory else None,
+            )
+            return self.middleware.run_post(result)
+
+        # Execute code blocks
+        code_blocks = extract_repl_blocks(response_text)
+
+        if code_blocks:
+            code_result = self._execute_blocks(
+                code_blocks, state["context"], state["buffers"], state["findings"],
+            )
+            if code_result["terminated"]:
+                result = build_result(
+                    code_result["final_answer"],
+                    source="FINAL() from code",
+                    root_input_tokens=state["root_in"],
+                    root_output_tokens=state["root_out"],
+                    trajectory=state["trajectory"] if self.save_trajectory else None,
+                )
+                return self.middleware.run_post(result)
+
+            code_output = code_result["output"]
+            if code_output:
+                truncated = code_output[:MAX_OUTPUT_CHARS]
+                if len(code_output) > MAX_OUTPUT_CHARS:
+                    truncated += (
+                        f"\n... [OUTPUT TRUNCATED: {len(code_output):,} chars "
+                        f"total, showing first {MAX_OUTPUT_CHARS:,}]"
+                    )
+                state["messages"].append(
+                    {"role": "assistant", "content": response_text}
+                )
+                state["messages"].append({
+                    "role": "user",
+                    "content": (
+                        f"Code execution output:\n```\n{truncated}\n```\n\n"
+                        "Continue your analysis. Use FINAL() or write "
+                        "FINAL_ANSWER: when you have your answer."
+                    ),
+                })
+                return None
+
+        # No code output or no code blocks
+        state["messages"].append({"role": "assistant", "content": response_text})
+        state["messages"].append({
+            "role": "user",
+            "content": (
+                "No code was executed. Write ```repl blocks to "
+                "interact with the document. You must explore the "
+                "context before providing a final answer."
+            ),
+        })
+        return None
+
+    def _build_fallback_result(self, state: Dict[str, Any], response_text: str,
+                               in_tok: int, out_tok: int) -> Dict[str, Any]:
+        """Build the final result when the iteration limit is reached."""
+        state["root_in"] += in_tok
+        state["root_out"] += out_tok
+        result = parse_final_answer(
+            response_text,
+            root_input_tokens=state["root_in"],
+            root_output_tokens=state["root_out"],
+            trajectory=state["trajectory"] if self.save_trajectory else None,
+        )
+        return self.middleware.run_post(result)
+
+    # ── Public entry points ─────────────────────────────────────────
+
     def run(
         self,
         question: str,
@@ -98,29 +213,7 @@ class QueryOrchestrator:
         Returns:
             Result dict with answer, evidence, confidence, metadata.
         """
-        # Run pre-query middleware
-        question, context = self.middleware.run_pre(question, context)
-
-        # State for this query
-        buffers: Dict[str, Any] = {}
-        findings: List[str] = []
-        trajectory: List[Dict] = []
-        root_input_tokens = 0
-        root_output_tokens = 0
-
-        system = self.system_prompt
-
-        messages = [
-            {
-                "role": "user",
-                "content": (
-                    f"Answer this query: {question}\n\n"
-                    "You have not interacted with the REPL environment yet. "
-                    "Explore the context by writing python code in ```repl blocks "
-                    "first before generating your final answer."
-                ),
-            }
-        ]
+        state = self._init_loop_state(question, context)
 
         for iteration in range(max_iterations):
             self._log(f"\n{'=' * 60}\nIteration {iteration + 1}\n{'=' * 60}")
@@ -128,85 +221,16 @@ class QueryOrchestrator:
             response_text, in_tok, out_tok = self.llm_client.call(
                 model=self.root_model,
                 max_tokens=self.root_max_tokens,
-                system=system,
-                messages=messages,
+                system=self.system_prompt,
+                messages=state["messages"],
             )
-            root_input_tokens += in_tok
-            root_output_tokens += out_tok
 
-            trajectory.append({
-                "iteration": iteration + 1,
-                "response": response_text,
-                "timestamp": datetime.now().isoformat(),
-            })
-
-            # Text-based termination
-            if "FINAL_ANSWER:" in response_text:
-                result = parse_final_answer(
-                    response_text,
-                    root_input_tokens=root_input_tokens,
-                    root_output_tokens=root_output_tokens,
-                    trajectory=trajectory if self.save_trajectory else None,
-                )
-                return self.middleware.run_post(result)
-
-            # Execute code blocks
-            code_blocks = extract_repl_blocks(response_text)
-
-            if code_blocks:
-                code_result = self._execute_blocks(
-                    code_blocks, context, buffers, findings,
-                )
-                if code_result["terminated"]:
-                    result = build_result(
-                        code_result["final_answer"],
-                        source="FINAL() from code",
-                        root_input_tokens=root_input_tokens,
-                        root_output_tokens=root_output_tokens,
-                        trajectory=trajectory if self.save_trajectory else None,
-                    )
-                    return self.middleware.run_post(result)
-
-                code_output = code_result["output"]
-                if code_output:
-                    truncated = code_output[:MAX_OUTPUT_CHARS]
-                    if len(code_output) > MAX_OUTPUT_CHARS:
-                        truncated += (
-                            f"\n... [OUTPUT TRUNCATED: {len(code_output):,} chars total, "
-                            f"showing first {MAX_OUTPUT_CHARS:,}]"
-                        )
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            f"Code execution output:\n```\n{truncated}\n```\n\n"
-                            "Continue your analysis. Use FINAL() or write "
-                            "FINAL_ANSWER: when you have your answer."
-                        ),
-                    })
-                else:
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "No code was executed. Write ```repl blocks to "
-                            "interact with the document. You must explore the "
-                            "context before providing a final answer."
-                        ),
-                    })
-            else:
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "No code was executed. Write ```repl blocks to "
-                        "interact with the document. You must explore the "
-                        "context before providing a final answer."
-                    ),
-                })
+            result = self._process_response(state, response_text, in_tok, out_tok)
+            if result is not None:
+                return result
 
         # Iteration limit fallback
-        messages.append({
+        state["messages"].append({
             "role": "user",
             "content": (
                 "You've reached the iteration limit. "
@@ -216,19 +240,10 @@ class QueryOrchestrator:
         response_text, in_tok, out_tok = self.llm_client.call(
             model=self.root_model,
             max_tokens=self.root_max_tokens,
-            system=system,
-            messages=messages,
+            system=self.system_prompt,
+            messages=state["messages"],
         )
-        root_input_tokens += in_tok
-        root_output_tokens += out_tok
-
-        result = parse_final_answer(
-            response_text,
-            root_input_tokens=root_input_tokens,
-            root_output_tokens=root_output_tokens,
-            trajectory=trajectory if self.save_trajectory else None,
-        )
-        return self.middleware.run_post(result)
+        return self._build_fallback_result(state, response_text, in_tok, out_tok)
 
     async def arun(
         self,
@@ -240,26 +255,7 @@ class QueryOrchestrator:
 
         Requires an AsyncLLMClient (one with `async def call()`).
         """
-        question, context = self.middleware.run_pre(question, context)
-
-        buffers: Dict[str, Any] = {}
-        findings: List[str] = []
-        trajectory: List[Dict] = []
-        root_input_tokens = 0
-        root_output_tokens = 0
-
-        system = self.system_prompt
-        messages = [
-            {
-                "role": "user",
-                "content": (
-                    f"Answer this query: {question}\n\n"
-                    "You have not interacted with the REPL environment yet. "
-                    "Explore the context by writing python code in ```repl blocks "
-                    "first before generating your final answer."
-                ),
-            }
-        ]
+        state = self._init_loop_state(question, context)
 
         for iteration in range(max_iterations):
             self._log(f"\n{'=' * 60}\nIteration {iteration + 1}\n{'=' * 60}")
@@ -267,82 +263,16 @@ class QueryOrchestrator:
             response_text, in_tok, out_tok = await self.llm_client.call(
                 model=self.root_model,
                 max_tokens=self.root_max_tokens,
-                system=system,
-                messages=messages,
+                system=self.system_prompt,
+                messages=state["messages"],
             )
-            root_input_tokens += in_tok
-            root_output_tokens += out_tok
 
-            trajectory.append({
-                "iteration": iteration + 1,
-                "response": response_text,
-                "timestamp": datetime.now().isoformat(),
-            })
+            result = self._process_response(state, response_text, in_tok, out_tok)
+            if result is not None:
+                return result
 
-            if "FINAL_ANSWER:" in response_text:
-                result = parse_final_answer(
-                    response_text,
-                    root_input_tokens=root_input_tokens,
-                    root_output_tokens=root_output_tokens,
-                    trajectory=trajectory if self.save_trajectory else None,
-                )
-                return self.middleware.run_post(result)
-
-            code_blocks = extract_repl_blocks(response_text)
-
-            if code_blocks:
-                code_result = self._execute_blocks(
-                    code_blocks, context, buffers, findings,
-                )
-                if code_result["terminated"]:
-                    result = build_result(
-                        code_result["final_answer"],
-                        source="FINAL() from code",
-                        root_input_tokens=root_input_tokens,
-                        root_output_tokens=root_output_tokens,
-                        trajectory=trajectory if self.save_trajectory else None,
-                    )
-                    return self.middleware.run_post(result)
-
-                code_output = code_result["output"]
-                if code_output:
-                    truncated = code_output[:MAX_OUTPUT_CHARS]
-                    if len(code_output) > MAX_OUTPUT_CHARS:
-                        truncated += (
-                            f"\n... [OUTPUT TRUNCATED: {len(code_output):,} chars total, "
-                            f"showing first {MAX_OUTPUT_CHARS:,}]"
-                        )
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            f"Code execution output:\n```\n{truncated}\n```\n\n"
-                            "Continue your analysis. Use FINAL() or write "
-                            "FINAL_ANSWER: when you have your answer."
-                        ),
-                    })
-                else:
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "No code was executed. Write ```repl blocks to "
-                            "interact with the document. You must explore the "
-                            "context before providing a final answer."
-                        ),
-                    })
-            else:
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "No code was executed. Write ```repl blocks to "
-                        "interact with the document. You must explore the "
-                        "context before providing a final answer."
-                    ),
-                })
-
-        messages.append({
+        # Iteration limit fallback
+        state["messages"].append({
             "role": "user",
             "content": (
                 "You've reached the iteration limit. "
@@ -352,19 +282,10 @@ class QueryOrchestrator:
         response_text, in_tok, out_tok = await self.llm_client.call(
             model=self.root_model,
             max_tokens=self.root_max_tokens,
-            system=system,
-            messages=messages,
+            system=self.system_prompt,
+            messages=state["messages"],
         )
-        root_input_tokens += in_tok
-        root_output_tokens += out_tok
-
-        result = parse_final_answer(
-            response_text,
-            root_input_tokens=root_input_tokens,
-            root_output_tokens=root_output_tokens,
-            trajectory=trajectory if self.save_trajectory else None,
-        )
-        return self.middleware.run_post(result)
+        return self._build_fallback_result(state, response_text, in_tok, out_tok)
 
     def run_batch(
         self,

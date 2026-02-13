@@ -7,7 +7,7 @@ protocol interface for use with QueryOrchestrator.
 
 import asyncio
 import time
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 
 import anthropic
 
@@ -44,7 +44,7 @@ class AnthropicClient:
         max_tokens: int,
         system: str,
         messages: List[Dict[str, str]],
-    ) -> tuple:
+    ) -> Tuple[str, int, int]:
         """Call the LLM and return (response_text, input_tokens, output_tokens).
 
         Implements the LLMClient protocol.
@@ -121,7 +121,7 @@ class AsyncAnthropicClient:
         max_tokens: int,
         system: str,
         messages: List[Dict[str, str]],
-    ) -> tuple:
+    ) -> Tuple[str, int, int]:
         """Call the LLM asynchronously and return (text, input_tokens, output_tokens)."""
         response = await self._call_with_retry(
             model=model,

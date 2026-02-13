@@ -14,10 +14,15 @@ This pattern is adapted from the original RLM repo's ThreadingLMServer.
 """
 
 import json
+import logging
 import socketserver
 import struct
 import threading
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
+
+MAX_IPC_MSG = 100 * 1024 * 1024  # 100 MB
 
 
 class IPCServer:
@@ -62,11 +67,25 @@ class IPCServer:
                         return
                     msg_len = struct.unpack("!I", length_bytes)[0]
 
+                    # Guard against unreasonable message sizes
+                    if msg_len > MAX_IPC_MSG:
+                        raise ValueError(
+                            f"IPC message too large: {msg_len} bytes "
+                            f"(max {MAX_IPC_MSG})"
+                        )
+
                     # Read the JSON request
                     data = self.rfile.read(msg_len)
                     request = json.loads(data.decode("utf-8"))
 
-                    prompt = request.get("prompt", "")
+                    # Validate required fields
+                    if "prompt" not in request:
+                        raise ValueError(
+                            f"Missing 'prompt' in IPC request: "
+                            f"{list(request.keys())}"
+                        )
+
+                    prompt = request["prompt"]
                     context_slice = request.get("context_slice")
 
                     # Call the sub_query function
@@ -84,7 +103,10 @@ class IPCServer:
                         self.wfile.write(err)
                         self.wfile.flush()
                     except Exception:
-                        pass
+                        logger.debug(
+                            "Failed to send error response via IPC",
+                            exc_info=True,
+                        )
 
         self._server = socketserver.ThreadingTCPServer(
             ("127.0.0.1", 0), SubQueryHandler

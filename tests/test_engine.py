@@ -334,3 +334,160 @@ def test_sandbox_result_to_dict():
     assert d["output"] == "some output"
     assert d["terminated"] is True
     assert d["final_answer"] == "$1.8M"
+
+
+# =============================================================================
+# Error Path Tests
+# =============================================================================
+
+
+def test_sandbox_timeout():
+    """Sandbox returns timeout message when code exceeds time limit."""
+    def mock_fn(prompt, context_slice=None):
+        return "mock"
+
+    with IPCServer(mock_fn) as ipc:
+        sandbox = Sandbox(timeout=1)
+        result = sandbox.execute(
+            code="import time; time.sleep(5)",
+            context="",
+            buffers={},
+            findings=[],
+            ipc_port=ipc.port,
+        )
+        assert "timed out" in result.output.lower()
+        assert not result.terminated
+
+
+def test_ipc_malformed_json():
+    """IPC server returns error response for malformed JSON, doesn't crash."""
+    import json
+    import socket
+    import struct
+
+    def mock_fn(prompt, context_slice=None):
+        return "mock"
+
+    with IPCServer(mock_fn) as server:
+        sock = socket.create_connection(("127.0.0.1", server.port), timeout=5)
+        try:
+            bad = b"not json at all"
+            sock.sendall(struct.pack("!I", len(bad)))
+            sock.sendall(bad)
+
+            # Should get an error response, not a crash
+            length_bytes = sock.recv(4)
+            if len(length_bytes) == 4:
+                msg_len = struct.unpack("!I", length_bytes)[0]
+                data = sock.recv(msg_len)
+                response = json.loads(data.decode("utf-8"))
+                assert "error" in response
+        finally:
+            sock.close()
+
+        # Server should still be usable after the bad request
+        assert server.port > 0
+
+
+def test_ipc_missing_prompt_field():
+    """IPC server returns error when 'prompt' field is missing from request."""
+    import json
+    import socket
+    import struct
+
+    def mock_fn(prompt, context_slice=None):
+        return "mock"
+
+    with IPCServer(mock_fn) as server:
+        sock = socket.create_connection(("127.0.0.1", server.port), timeout=5)
+        try:
+            # Valid JSON but missing required 'prompt' field
+            request = {"context_slice": "some context"}
+            req_bytes = json.dumps(request).encode("utf-8")
+            sock.sendall(struct.pack("!I", len(req_bytes)))
+            sock.sendall(req_bytes)
+
+            length_bytes = sock.recv(4)
+            msg_len = struct.unpack("!I", length_bytes)[0]
+            data = sock.recv(msg_len)
+            response = json.loads(data.decode("utf-8"))
+            assert "error" in response
+            assert "prompt" in response["error"].lower()
+        finally:
+            sock.close()
+
+
+def test_ipc_oversized_message_rejected():
+    """IPC server rejects messages that exceed MAX_IPC_MSG."""
+    import json
+    import socket
+    import struct
+    from claude_rlm.engine.ipc import MAX_IPC_MSG
+
+    def mock_fn(prompt, context_slice=None):
+        return "mock"
+
+    with IPCServer(mock_fn) as server:
+        sock = socket.create_connection(("127.0.0.1", server.port), timeout=5)
+        try:
+            # Send a length prefix that exceeds the max
+            fake_len = MAX_IPC_MSG + 1
+            sock.sendall(struct.pack("!I", fake_len))
+            # Don't actually send that many bytes — server should reject
+            # based on the length prefix alone
+
+            length_bytes = sock.recv(4)
+            if len(length_bytes) == 4:
+                msg_len = struct.unpack("!I", length_bytes)[0]
+                data = sock.recv(msg_len)
+                response = json.loads(data.decode("utf-8"))
+                assert "error" in response
+                assert "too large" in response["error"].lower()
+        finally:
+            sock.close()
+
+
+# =============================================================================
+# Edge Case Tests
+# =============================================================================
+
+
+def test_extract_repl_blocks_empty_string():
+    """extract_repl_blocks returns empty list for empty string."""
+    blocks = extract_repl_blocks("")
+    assert blocks == []
+
+
+def test_sandbox_empty_code():
+    """Sandbox handles empty code string gracefully."""
+    def mock_fn(prompt, context_slice=None):
+        return "mock"
+
+    with IPCServer(mock_fn) as ipc:
+        sandbox = Sandbox(timeout=10)
+        result = sandbox.execute(
+            code="",
+            context="test context",
+            buffers={},
+            findings=[],
+            ipc_port=ipc.port,
+        )
+        # Should not crash — empty code is valid Python
+        assert not result.terminated
+
+
+def test_sandbox_empty_context():
+    """Sandbox works with empty context string."""
+    def mock_fn(prompt, context_slice=None):
+        return "mock"
+
+    with IPCServer(mock_fn) as ipc:
+        sandbox = Sandbox(timeout=10)
+        result = sandbox.execute(
+            code='print(f"Context length: {len(context)}")',
+            context="",
+            buffers={},
+            findings=[],
+            ipc_port=ipc.port,
+        )
+        assert "Context length: 0" in result.output

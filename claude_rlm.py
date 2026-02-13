@@ -30,6 +30,7 @@ Usage:
 
 import anthropic
 import json
+import os
 import re
 import socket
 import socketserver
@@ -344,17 +345,20 @@ Text to analyze:
     def _extract_pdf(self, path: Path) -> str:
         """Extract text from PDF using available tools."""
         try:
+            env = {**os.environ, "RLM_DOC_PATH": str(path)}
             result = subprocess.run(
                 [
                     "python3", "-c",
+                    "import os; "
                     "from docling.document_converter import DocumentConverter; "
                     "converter = DocumentConverter(); "
-                    f"result = converter.convert('{path}'); "
+                    "result = converter.convert(os.environ['RLM_DOC_PATH']); "
                     "print(result.document.export_to_markdown())",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=120,
+                env=env,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout

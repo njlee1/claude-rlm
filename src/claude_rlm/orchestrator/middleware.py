@@ -6,7 +6,7 @@ after they come back. This replaces scattered hardcoded logic
 (synonym expansion, cost tracking, logging) with composable hooks.
 """
 
-from typing import Protocol, Dict, Any, List, Optional, runtime_checkable
+from typing import Protocol, Dict, Any, List, Optional, Tuple, runtime_checkable
 
 
 @runtime_checkable
@@ -17,7 +17,7 @@ class Middleware(Protocol):
     is valid (pass-through middleware).
     """
 
-    def pre_query(self, question: str, context: str) -> tuple:
+    def pre_query(self, question: str, context: str) -> Tuple[str, str]:
         """Transform question and context before the query loop.
 
         Returns:
@@ -48,7 +48,7 @@ class MiddlewareChain:
         """Add a middleware to the end of the chain."""
         self._middlewares.append(middleware)
 
-    def run_pre(self, question: str, context: str) -> tuple:
+    def run_pre(self, question: str, context: str) -> Tuple[str, str]:
         """Run all pre_query hooks in order."""
         for mw in self._middlewares:
             if hasattr(mw, "pre_query"):
@@ -71,7 +71,7 @@ class MiddlewareChain:
 class VerboseLoggingMiddleware:
     """Logs query and result details to stdout."""
 
-    def pre_query(self, question: str, context: str) -> tuple:
+    def pre_query(self, question: str, context: str) -> Tuple[str, str]:
         print(f"[RLM] Query: {question[:100]}...")
         print(f"[RLM] Context: {len(context)} chars")
         return question, context
@@ -94,7 +94,7 @@ class CostTrackingMiddleware:
         self.total_sub_output: int = 0
         self.query_count: int = 0
 
-    def pre_query(self, question: str, context: str) -> tuple:
+    def pre_query(self, question: str, context: str) -> Tuple[str, str]:
         self.query_count += 1
         return question, context
 

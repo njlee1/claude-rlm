@@ -13,11 +13,14 @@ code runs here, never in the parent process.
 """
 
 import json
+import logging
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -139,7 +142,7 @@ class Sandbox:
                 findings.clear()
                 findings.extend(updated_state.get("findings", []))
             except Exception:
-                pass
+                logger.debug("State file read failed, using defaults", exc_info=True)
 
             # Check for FINAL()/FINAL_VAR() termination
             try:
@@ -152,7 +155,10 @@ class Sandbox:
                         final_answer=term_state.get("final_answer", ""),
                     )
             except Exception:
-                pass
+                logger.debug(
+                    "Termination file read failed, assuming not terminated",
+                    exc_info=True,
+                )
 
             return SandboxResult(
                 output="\n".join(output_parts) if output_parts else "",

@@ -5,9 +5,13 @@ Each ingestor handles a set of file extensions and returns plain text.
 The IngestorChain tries ingestors in order until one succeeds.
 """
 
+import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class TextIngestor:
@@ -31,24 +35,30 @@ class PDFIngestor:
         return path.suffix.lower() in self.extensions
 
     def extract(self, path: Path) -> str:
-        # Try docling first (best quality)
+        errors: List[str] = []
+
+        # Try docling first (best quality) — path passed via env var to avoid injection
         try:
+            env = {**os.environ, "RLM_DOC_PATH": str(path)}
             result = subprocess.run(
                 [
                     "python3", "-c",
+                    "import os; "
                     "from docling.document_converter import DocumentConverter; "
                     "converter = DocumentConverter(); "
-                    f"result = converter.convert('{path}'); "
+                    "result = converter.convert(os.environ['RLM_DOC_PATH']); "
                     "print(result.document.export_to_markdown())",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=120,
+                env=env,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("docling extraction failed for %s: %s", path, e)
+            errors.append(f"docling: {e}")
 
         # Fallback to pdftotext
         try:
@@ -60,10 +70,14 @@ class PDFIngestor:
             )
             if result.returncode == 0:
                 return result.stdout
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("pdftotext extraction failed for %s: %s", path, e)
+            errors.append(f"pdftotext: {e}")
 
-        raise RuntimeError(f"Could not extract text from PDF: {path}")
+        raise RuntimeError(
+            f"Could not extract text from PDF: {path}"
+            + (f" ({'; '.join(errors)})" if errors else "")
+        )
 
 
 class DocxIngestor:
@@ -84,8 +98,8 @@ class DocxIngestor:
             )
             if result.returncode == 0:
                 return result.stdout
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("pandoc extraction failed for %s: %s", path, e)
 
         raise RuntimeError(f"Could not extract text from DOCX: {path}")
 
@@ -129,7 +143,8 @@ class IngestorChain:
         # Ultimate fallback: try reading as plain text
         try:
             return path.read_text(encoding="utf-8")
-        except Exception:
+        except Exception as e:
+            logger.debug("Plain text fallback failed for %s: %s", path, e)
             raise RuntimeError(
                 f"No ingestor can handle '{path.suffix}' files: {path}"
             )

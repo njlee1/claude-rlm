@@ -298,3 +298,77 @@ def test_compute_cost():
     # Haiku: 500K * 0.25/M + 50K * 1.25/M = 0.125 + 0.0625 = 0.1875
     assert cost["sub_cost_usd"] == 0.1875
     assert cost["total_cost_usd"] == 4.6875
+
+
+# =============================================================================
+# Error Path Tests
+# =============================================================================
+
+
+def test_middleware_pre_exception_propagates():
+    """Exception in pre_query propagates to caller."""
+    class BadMiddleware:
+        def pre_query(self, q, c):
+            raise ValueError("boom in pre_query")
+        def post_query(self, r):
+            return r
+
+    chain = MiddlewareChain([BadMiddleware()])
+    with pytest.raises(ValueError, match="boom in pre_query"):
+        chain.run_pre("question", "context")
+
+
+def test_middleware_post_exception_propagates():
+    """Exception in post_query propagates to caller."""
+    class BadMiddleware:
+        def pre_query(self, q, c):
+            return q, c
+        def post_query(self, r):
+            raise RuntimeError("boom in post_query")
+
+    chain = MiddlewareChain([BadMiddleware()])
+    with pytest.raises(RuntimeError, match="boom in post_query"):
+        chain.run_post({"answer": "test"})
+
+
+def test_orchestrator_no_code_no_final_loops():
+    """Orchestrator keeps looping when LLM gives text without code or FINAL."""
+    client = MockLLMClient([
+        "Let me think about this...",
+        "I'm still thinking...",
+        "FINAL_ANSWER: finally got it",
+    ])
+
+    orchestrator = QueryOrchestrator(
+        llm_client=client,
+        sub_query_fn=lambda p, c=None: "mock",
+        system_prompt="test",
+    )
+    result = orchestrator.run("test", "context", max_iterations=5)
+    assert result["answer"] == "finally got it"
+    assert len(client.calls) == 3
+
+
+def test_parse_final_answer_multiline():
+    """Parser handles multi-line FINAL_ANSWER correctly."""
+    response = (
+        "FINAL_ANSWER: Line one\n"
+        "SOURCE_EVIDENCE: line 42\n"
+        "CONFIDENCE: high"
+    )
+    result = parse_final_answer(response)
+    assert result["answer"] == "Line one"
+
+
+def test_build_result_with_trajectory():
+    """build_result includes trajectory when provided."""
+    trajectory = [
+        {"iteration": 1, "response": "test", "timestamp": "2024-01-01T00:00:00"},
+    ]
+    result = build_result(
+        "answer",
+        source="test",
+        trajectory=trajectory,
+    )
+    assert result["trajectory"] == trajectory
+    assert len(result["trajectory"]) == 1

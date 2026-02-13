@@ -149,3 +149,41 @@ def test_registry_list_documents():
     docs = registry.list_documents()
     assert len(docs) == 2
     assert docs[0].doc_id == "a"
+
+
+# =============================================================================
+# Edge Case Tests
+# =============================================================================
+
+
+def test_registry_load_empty_text():
+    """Registry handles empty text without error."""
+    registry = DocumentRegistry()
+    meta = registry.load_text("empty", "")
+    assert meta.char_count == 0
+    assert registry.get("empty") == ""
+
+
+def test_registry_overwrite_document():
+    """Loading a document with same ID overwrites the previous one."""
+    registry = DocumentRegistry()
+    registry.load_text("doc", "version 1")
+    registry.load_text("doc", "version 2")
+    assert registry.get("doc") == "version 2"
+    assert len(registry) == 1
+
+
+def test_registry_combined_single_doc():
+    """get_combined_context with single doc includes section marker."""
+    registry = DocumentRegistry()
+    registry.load_text("only", "Only document")
+    combined = registry.get_combined_context(["only"])
+    assert "=== DOCUMENT: only ===" in combined
+    assert "Only document" in combined
+
+
+def test_registry_remove_nonexistent():
+    """Removing nonexistent doc is a no-op (doesn't raise)."""
+    registry = DocumentRegistry()
+    registry.remove("nonexistent")  # Should not raise
+    assert len(registry) == 0

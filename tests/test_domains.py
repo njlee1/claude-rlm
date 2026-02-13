@@ -144,3 +144,47 @@ def test_router_list_domains():
     assert "insurance" in domains
     assert "real_estate" in domains
     assert "compliance" in domains
+
+
+# =============================================================================
+# Edge Case Tests
+# =============================================================================
+
+
+def test_detect_empty_text():
+    """Empty text falls back to BaseDomain."""
+    domain = detect_domain("")
+    assert isinstance(domain, BaseDomain)
+    assert domain.name == "generic"
+
+
+def test_detect_empty_text_with_filename():
+    """Empty text with finance filename still detects finance."""
+    domain = detect_domain("", filename="10k_filing.pdf")
+    assert domain.name == "finance"
+
+
+def test_router_detect_multi_empty_text():
+    """detect_multi with empty text returns empty list."""
+    router = DomainRouter()
+    domains = router.detect_multi("", threshold=0.3)
+    assert domains == []
+
+
+def test_finance_synonym_group_keys():
+    """Finance domain has expected synonym groups."""
+    fin = FinanceDomain()
+    # Check that core groups exist
+    assert "revenue" in fin.synonyms
+
+    # Each synonym group should have at least 2 terms
+    for group, terms in fin.synonyms.items():
+        assert len(terms) >= 2, f"Group '{group}' has only {len(terms)} terms"
+
+
+def test_base_domain_fallback():
+    """BaseDomain provides empty synonyms and generic name."""
+    base = BaseDomain()
+    assert base.name == "generic"
+    assert base.synonyms == {}
+    assert base.detect("any text") == 0.0
